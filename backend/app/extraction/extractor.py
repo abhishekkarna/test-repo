@@ -1,20 +1,14 @@
 """
-Uses Claude to extract structured promise objects from raw text (news articles,
-parliamentary debates, speeches). Also detects contradictions against existing
-promises.
+Extracts structured promise objects from raw text and detects contradictions.
+Uses the configured LLM provider (Ollama/Llama by default, Anthropic for production).
 """
 
 import json
 import logging
-from datetime import datetime
 
-import anthropic
-
-from app.config import settings
+from app.extraction.llm_client import llm
 
 logger = logging.getLogger(__name__)
-
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 SYSTEM_PROMPT = """You are a political analyst specializing in tracking politician promises and commitments.
 Your task is to extract specific, concrete promises from political text.
@@ -50,7 +44,7 @@ Return a JSON array of promises. Each promise object must have:
   "topic": one of ["economy", "healthcare", "education", "infrastructure", "agriculture", "defense", "environment", "social_welfare", "governance", "foreign_policy", "other"],
   "promised_at": "ISO date string or null",
   "deadline": "ISO date string if a timeframe is mentioned, else null",
-  "confidence_score": float between 0 and 1 (how confident this is a real promise),
+  "confidence_score": float between 0 and 1,
   "extraction_notes": "brief explanation of why this qualifies as a promise"
 }}
 
@@ -69,7 +63,7 @@ New promise:
 Existing promises on the same topic:
 {existing_promises}
 
-For each existing promise that contradicts the new one, return a JSON array:
+For each existing promise that contradicts the new one, return a JSON array of objects:
 {{
   "existing_promise_id": <id>,
   "explanation": "clear explanation of the contradiction",
@@ -79,15 +73,30 @@ For each existing promise that contradicts the new one, return a JSON array:
 
 Contradiction criteria:
 - Direct reversal: promised X, now promises not-X
-- Incompatible commitments: promises two things that cannot both be true
-- Timeline contradiction: promised within 2 years, now says 5 years
+- Incompatible commitments: two things that cannot both be true
+- Timeline contradiction: promised 2 years, now says 5 years
 
 NOT a contradiction:
 - Refinements or additions to earlier promises
-- Changed context (different geographic scope, updated fiscal conditions)
-- Evolution of position with acknowledged change
+- Changed context (different geography, updated fiscal conditions)
 
 Return [] if no contradictions. Return ONLY valid JSON."""
+
+
+def _parse_json(raw: str) -> list:
+    """Strip markdown fences and parse JSON, returning [] on failure."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else ""
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        result = json.loads(raw.strip())
+        return result if isinstance(result, list) else []
+    except json.JSONDecodeError as e:
+        logger.error("JSON parse error: %s\nRaw: %.200s", e, raw)
+        return []
 
 
 def extract_promises(
@@ -102,33 +111,10 @@ def extract_promises(
         source_type=source_type,
         source_title=source_title,
         source_date=source_date or "unknown",
-        text=text[:8000],  # stay within context limits
+        text=text[:6000],
     )
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
-
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
-
-        promises = json.loads(raw)
-        if not isinstance(promises, list):
-            return []
-        return promises
-
-    except (json.JSONDecodeError, anthropic.APIError) as e:
-        logger.error("Extraction failed: %s", e)
-        return []
+    raw = llm.complete(system=SYSTEM_PROMPT, user=prompt, max_tokens=2048)
+    return _parse_json(raw)
 
 
 def detect_contradictions(
@@ -145,7 +131,6 @@ def detect_contradictions(
         f'[ID {p["id"]}] "{p["summary"]}" (made: {p.get("promised_at", "unknown")})'
         for p in existing_promises
     )
-
     prompt = CONTRADICTION_PROMPT_TEMPLATE.format(
         leader_name=leader_name,
         new_promise=new_promise_text,
@@ -153,27 +138,5 @@ def detect_contradictions(
         topic=topic,
         existing_promises=existing_formatted,
     )
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
-
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
-
-        contradictions = json.loads(raw)
-        if not isinstance(contradictions, list):
-            return []
-        return contradictions
-
-    except (json.JSONDecodeError, anthropic.APIError) as e:
-        logger.error("Contradiction detection failed: %s", e)
-        return []
+    raw = llm.complete(system=SYSTEM_PROMPT, user=prompt, max_tokens=1024)
+    return _parse_json(raw)
