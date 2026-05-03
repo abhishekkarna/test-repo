@@ -17,7 +17,7 @@ import urllib.parse
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-import feedparser
+import xml.etree.ElementTree as ET
 import httpx
 from bs4 import BeautifulSoup
 
@@ -27,12 +27,7 @@ from app.extraction.scrapers.utils import clean_text, make_client, normalize_nam
 logger = logging.getLogger(__name__)
 
 # Attempt PDF extraction; gracefully degrade if pdfplumber not installed
-try:
-    import pdfplumber
-    _PDF_SUPPORT = True
-except ImportError:
-    _PDF_SUPPORT = False
-    logger.warning("pdfplumber not installed — PDF debate transcripts will be skipped")
+_PDF_SUPPORT = False  # determined lazily on first use
 
 
 # ── Base ──────────────────────────────────────────────────────────────────────
@@ -196,7 +191,10 @@ class PRSIndiaScraper(ParliamentScraper):
         return body.get_text(separator="\n", strip=True) if body else None
 
     def _extract_pdf(self, content: bytes, max_pages: int = 10) -> str | None:
-        if not _PDF_SUPPORT:
+        try:
+            import pdfplumber
+        except Exception:
+            logger.warning("pdfplumber unavailable — skipping PDF")
             return None
         try:
             pages = []
@@ -221,17 +219,18 @@ class PRSIndiaScraper(ParliamentScraper):
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
         articles = []
         try:
-            feed = feedparser.parse(rss_url)
-            for entry in feed.entries[:max_items]:
-                articles.append(
-                    self._article(
-                        entry.get("title", ""),
-                        entry.get("summary", ""),
-                        entry.get("link", ""),
-                        entry.get("published"),
+            resp = self._get(rss_url)
+            if resp and resp.status_code == 200:
+                root = ET.fromstring(resp.text)
+                channel = root.find("channel")
+                for item in (channel.findall("item") if channel is not None else [])[:max_items]:
+                    articles.append(self._article(
+                        item.findtext("title") or "",
+                        item.findtext("description") or "",
+                        item.findtext("link") or "",
+                        item.findtext("pubDate"),
                         source_type,
-                    )
-                )
+                    ))
         except Exception as e:
             logger.error("PRS RSS fallback failed: %s", e)
         return articles
@@ -487,17 +486,18 @@ class PIBScraper(ParliamentScraper):
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
         articles = []
         try:
-            feed = feedparser.parse(rss_url)
-            for entry in feed.entries[:max_items]:
-                articles.append(
-                    self._article(
-                        entry.get("title", ""),
-                        entry.get("summary", ""),
-                        entry.get("link", ""),
-                        entry.get("published"),
+            resp = self._get(rss_url)
+            if resp and resp.status_code == 200:
+                root = ET.fromstring(resp.text)
+                channel = root.find("channel")
+                for item in (channel.findall("item") if channel is not None else [])[:max_items]:
+                    articles.append(self._article(
+                        item.findtext("title") or "",
+                        item.findtext("description") or "",
+                        item.findtext("link") or "",
+                        item.findtext("pubDate"),
                         "press_release",
-                    )
-                )
+                    ))
         except Exception as e:
             logger.error("PIB RSS fallback failed: %s", e)
         return articles

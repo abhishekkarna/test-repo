@@ -4,9 +4,9 @@ Returns a list of article dicts: {title, text, url, published_at, source_type}
 """
 
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
-import feedparser
 import httpx
 
 from app.config import settings
@@ -57,18 +57,25 @@ def fetch_google_news_rss(leader_name: str, max_articles: int = 20) -> list[dict
     url = GOOGLE_NEWS_RSS.format(query=query.replace(" ", "+"))
 
     try:
-        feed = feedparser.parse(url)
+        resp = httpx.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        channel = root.find("channel")
+        if channel is None:
+            return []
         articles = []
-        for entry in feed.entries[:max_articles]:
-            articles.append(
-                {
-                    "title": entry.get("title", ""),
-                    "text": entry.get("summary", ""),
-                    "url": entry.get("link", ""),
-                    "published_at": entry.get("published"),
-                    "source_type": "news_article",
-                }
-            )
+        for item in channel.findall("item")[:max_articles]:
+            title = item.findtext("title") or ""
+            link = item.findtext("link") or ""
+            pub_date = item.findtext("pubDate")
+            description = item.findtext("description") or ""
+            articles.append({
+                "title": title,
+                "text": description,
+                "url": link,
+                "published_at": pub_date,
+                "source_type": "news_article",
+            })
         return articles
     except Exception as e:
         logger.error("Google News RSS error: %s", e)

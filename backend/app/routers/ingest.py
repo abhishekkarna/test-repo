@@ -27,7 +27,7 @@ def trigger_ingestion(
         mode=IngestionMode.INCREMENTAL,
         leader_id=payload.leader_id,
         status="pending",
-        metadata={"query": payload.query, "max_articles": payload.max_articles},
+        job_metadata={"query": payload.query, "max_articles": payload.max_articles},
     )
     db.add(job)
     db.commit()
@@ -69,7 +69,7 @@ def trigger_backfill(
         mode=IngestionMode.BACKFILL,
         leader_id=payload.leader_id,
         status="pending",
-        metadata={"query": payload.query, "max_articles": payload.max_articles},
+        job_metadata={"query": payload.query, "max_articles": payload.max_articles},
     )
     db.add(job)
     db.commit()
@@ -186,7 +186,7 @@ def retry_job(
     payload = IngestRequest(
         leader_id=job.leader_id,
         source_type=job.source_type,
-        max_articles=(job.metadata or {}).get("max_articles", 30),
+        max_articles=(job.job_metadata or {}).get("max_articles", 30),
     )
     background_tasks.add_task(run_ingestion_pipeline, job.id, payload)
 
@@ -225,7 +225,7 @@ def _job_dict(job: IngestionJob) -> dict:
         "articles_scraped": job.articles_scraped,
         "articles_deduped": job.articles_deduped,
         "error_message": job.error_message,
-        "metadata": job.metadata,
+        "metadata": job.job_metadata,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "created_at": job.created_at,
