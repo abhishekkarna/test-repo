@@ -1,8 +1,13 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import settings
 from app.database import Base, engine
 from app.routers import ingest, leaders, promises
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(
     title="Leader Promise Tracker",
@@ -24,10 +29,20 @@ app.include_router(ingest.router)
 
 
 @app.on_event("startup")
-def create_tables():
+def startup():
     Base.metadata.create_all(bind=engine)
+    if settings.scheduler_enabled:
+        from app.scheduler import start_scheduler
+        start_scheduler()
+
+
+@app.on_event("shutdown")
+def shutdown():
+    if settings.scheduler_enabled:
+        from app.scheduler import stop_scheduler
+        stop_scheduler()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "llm_provider": settings.llm_provider}

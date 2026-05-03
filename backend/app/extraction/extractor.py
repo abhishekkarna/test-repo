@@ -83,6 +83,41 @@ NOT a contradiction:
 Return [] if no contradictions. Return ONLY valid JSON."""
 
 
+STATUS_CHECK_PROMPT_TEMPLATE = """You are reviewing whether a recent news article or parliamentary record indicates
+a status change for any of the following existing political promises.
+
+Leader: {leader_name}
+
+Pending / in-progress promises:
+{promises_list}
+
+Recent article:
+Title: {article_title}
+Date: {article_date}
+---
+{article_text}
+---
+
+For each promise where this article clearly indicates a status change, return a JSON array:
+{{
+  "promise_id": <id>,
+  "new_status": one of ["in_progress", "fulfilled", "broken", "expired"],
+  "confidence_score": float 0-1,
+  "note": "explanation of why this article indicates the status change",
+  "evidence_quote": "relevant quote from the article (max 200 chars)"
+}}
+
+Rules:
+- "fulfilled": concrete evidence the promise was delivered (inauguration, scheme launched, bill passed)
+- "broken": leader explicitly walked back, or government action directly opposes the promise
+- "in_progress": budget allocated, tender issued, bill introduced clearly related to this promise
+- "expired": deadline passed with no action
+- Only include promises where confidence_score >= 0.7
+- Return [] if no status changes are evident
+
+Return ONLY valid JSON, no other text."""
+
+
 def _parse_json(raw: str) -> list:
     """Strip markdown fences and parse JSON, returning [] on failure."""
     raw = raw.strip()
@@ -137,6 +172,32 @@ def detect_contradictions(
         new_date=new_promise_date or "unknown",
         topic=topic,
         existing_promises=existing_formatted,
+    )
+    raw = llm.complete(system=SYSTEM_PROMPT, user=prompt, max_tokens=1024)
+    return _parse_json(raw)
+
+
+def check_promise_status(
+    article_title: str,
+    article_text: str,
+    article_date: str | None,
+    leader_name: str,
+    existing_promises: list[dict],
+) -> list[dict]:
+    """Check if an article updates the status of any existing promises."""
+    if not existing_promises:
+        return []
+
+    promises_list = "\n".join(
+        f'[ID {p["id"]}] ({p["topic"]}) "{p["summary"]}" — status: {p["status"]}'
+        for p in existing_promises
+    )
+    prompt = STATUS_CHECK_PROMPT_TEMPLATE.format(
+        leader_name=leader_name,
+        promises_list=promises_list,
+        article_title=article_title,
+        article_date=article_date or "unknown",
+        article_text=article_text[:4000],
     )
     raw = llm.complete(system=SYSTEM_PROMPT, user=prompt, max_tokens=1024)
     return _parse_json(raw)

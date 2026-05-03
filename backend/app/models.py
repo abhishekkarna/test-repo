@@ -8,9 +8,11 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,12 +20,12 @@ from app.database import Base
 
 
 class PromiseStatus(str, enum.Enum):
-    PENDING = "pending"          # Made but no action yet
-    IN_PROGRESS = "in_progress"  # Actively being worked on
-    FULFILLED = "fulfilled"      # Delivered
-    BROKEN = "broken"            # Explicitly walked back or failed
-    EXPIRED = "expired"          # Deadline passed with no delivery
-    CONTRADICTED = "contradicted" # Contradicts an earlier promise
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    FULFILLED = "fulfilled"
+    BROKEN = "broken"
+    EXPIRED = "expired"
+    CONTRADICTED = "contradicted"
 
 
 class PromiseTopic(str, enum.Enum):
@@ -50,18 +52,25 @@ class SourceType(str, enum.Enum):
     MANIFESTO = "manifesto"
 
 
+class IngestionMode(str, enum.Enum):
+    BACKFILL = "backfill"        # one-time historical load, no date filter
+    INCREMENTAL = "incremental"  # daily scan, only since last_ingested_at
+
+
 class Leader(Base):
     __tablename__ = "leaders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     party: Mapped[str | None] = mapped_column(String(100))
-    position: Mapped[str | None] = mapped_column(String(200))  # e.g. "Prime Minister", "Chief Minister of Maharashtra"
+    position: Mapped[str | None] = mapped_column(String(200))
     constituency: Mapped[str | None] = mapped_column(String(200))
     state: Mapped[str | None] = mapped_column(String(100))
     country: Mapped[str] = mapped_column(String(100), default="India")
     photo_url: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_ingested_at: Mapped[datetime | None] = mapped_column(DateTime)  # cutoff for incremental runs
+    backfill_completed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -69,40 +78,41 @@ class Leader(Base):
 
     @property
     def promise_stats(self):
-        counts = {}
-        for s in PromiseStatus:
-            counts[s.value] = sum(1 for p in self.promises if p.status == s)
+        counts = {s.value: sum(1 for p in self.promises if p.status == s) for s in PromiseStatus}
         counts["total"] = len(self.promises)
         return counts
 
 
 class Promise(Base):
     __tablename__ = "promises"
+    __table_args__ = (
+        Index("ix_promises_leader_topic", "leader_id", "topic"),
+        Index("ix_promises_status", "status"),
+        Index("ix_promises_deadline", "deadline"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     leader_id: Mapped[int] = mapped_column(Integer, ForeignKey("leaders.id"), nullable=False)
 
-    # Core promise content
-    text: Mapped[str] = mapped_column(Text, nullable=False)             # Original statement
-    summary: Mapped[str] = mapped_column(String(500), nullable=False)   # LLM-generated short summary
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
     topic: Mapped[PromiseTopic] = mapped_column(Enum(PromiseTopic), default=PromiseTopic.OTHER)
     status: Mapped[PromiseStatus] = mapped_column(Enum(PromiseStatus), default=PromiseStatus.PENDING)
 
-    # Temporal context
-    promised_at: Mapped[datetime | None] = mapped_column(DateTime)       # When the promise was made
-    deadline: Mapped[datetime | None] = mapped_column(DateTime)          # Stated or inferred deadline
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)       # When status changed to fulfilled/broken
+    promised_at: Mapped[datetime | None] = mapped_column(DateTime)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
 
-    # Source tracing
     source_url: Mapped[str | None] = mapped_column(String(1000))
     source_type: Mapped[SourceType] = mapped_column(Enum(SourceType), default=SourceType.NEWS_ARTICLE)
     source_title: Mapped[str | None] = mapped_column(String(500))
 
-    # LLM extraction metadata
-    confidence_score: Mapped[float | None] = mapped_column(Float)        # 0–1, how confident LLM is this is a real promise
-    extraction_notes: Mapped[str | None] = mapped_column(Text)           # LLM reasoning
-    raw_context: Mapped[str | None] = mapped_column(Text)               # Surrounding text used for extraction
-    verified: Mapped[bool] = mapped_column(Boolean, default=False)       # Human-reviewed
+    confidence_score: Mapped[float | None] = mapped_column(Float)
+    extraction_notes: Mapped[str | None] = mapped_column(Text)
+    raw_context: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str | None] = mapped_column(String(64))     # SHA-256 of summary for promise dedup
+    near_duplicate_of: Mapped[int | None] = mapped_column(Integer, ForeignKey("promises.id"))  # future embedding dedup
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -118,8 +128,6 @@ class Promise(Base):
 
 
 class PromiseStatusUpdate(Base):
-    """Audit trail for every status change on a promise."""
-
     __tablename__ = "promise_status_updates"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -134,19 +142,19 @@ class PromiseStatusUpdate(Base):
 
 
 class Contradiction(Base):
-    """Links two promises that contradict each other, with LLM-generated explanation."""
-
     __tablename__ = "contradictions"
+    __table_args__ = (
+        UniqueConstraint("original_promise_id", "contradicting_promise_id", name="uq_contradiction_pair"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     original_promise_id: Mapped[int] = mapped_column(Integer, ForeignKey("promises.id"), nullable=False)
     contradicting_promise_id: Mapped[int] = mapped_column(Integer, ForeignKey("promises.id"), nullable=False)
 
-    explanation: Mapped[str] = mapped_column(Text, nullable=False)   # LLM explanation of the contradiction
-    severity: Mapped[str] = mapped_column(String(20), default="moderate")  # minor / moderate / major
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), default="moderate")
     confidence_score: Mapped[float | None] = mapped_column(Float)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
-
     detected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     original_promise: Mapped["Promise"] = relationship(
@@ -157,17 +165,37 @@ class Contradiction(Base):
     )
 
 
-class IngestionJob(Base):
-    """Tracks each scraping / ingestion run."""
+class ScrapedArticle(Base):
+    """Deduplication cache — prevents re-processing the same article."""
 
+    __tablename__ = "scraped_articles"
+    __table_args__ = (
+        UniqueConstraint("leader_id", "content_hash", name="uq_leader_content"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    url_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50))
+    leader_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("leaders.id"))
+    title: Mapped[str | None] = mapped_column(String(500))
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    promises_extracted: Mapped[int] = mapped_column(Integer, default=0)
+    scraped_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_type: Mapped[str] = mapped_column(String(50))
+    mode: Mapped[IngestionMode] = mapped_column(Enum(IngestionMode), default=IngestionMode.INCREMENTAL)
     leader_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("leaders.id"))
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending/running/done/failed
     promises_extracted: Mapped[int] = mapped_column(Integer, default=0)
     contradictions_found: Mapped[int] = mapped_column(Integer, default=0)
+    articles_scraped: Mapped[int] = mapped_column(Integer, default=0)
+    articles_deduped: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     metadata: Mapped[dict | None] = mapped_column(JSON)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
