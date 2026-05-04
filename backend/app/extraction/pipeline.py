@@ -78,7 +78,7 @@ def _run(db: Session, job_id: int, payload: IngestRequest) -> None:
 
     is_backfill = job.mode == IngestionMode.BACKFILL
     since_date = None if is_backfill else leader.last_ingested_at
-    max_items = payload.max_articles if not is_backfill else 200
+    max_items = payload.max_articles
 
     logger.info(
         "[job=%d] %s | leader=%s | source=%s | since=%s | max=%d",
