@@ -166,7 +166,7 @@ class Contradiction(Base):
 
 
 class ScrapedArticle(Base):
-    """Deduplication cache — prevents re-processing the same article."""
+    """Raw article store — dedup cache + full text for two-phase pipeline."""
 
     __tablename__ = "scraped_articles"
     __table_args__ = (
@@ -179,7 +179,10 @@ class ScrapedArticle(Base):
     source_type: Mapped[str] = mapped_column(String(50))
     leader_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("leaders.id"))
     title: Mapped[str | None] = mapped_column(String(500))
+    published_at: Mapped[str | None] = mapped_column(String(100))
+    text: Mapped[str | None] = mapped_column(Text)              # full article text
     content_hash: Mapped[str | None] = mapped_column(String(64))
+    processed: Mapped[bool] = mapped_column(Boolean, default=False)  # True after LLM extraction
     promises_extracted: Mapped[int] = mapped_column(Integer, default=0)
     scraped_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -189,6 +192,7 @@ class IngestionJob(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_type: Mapped[str] = mapped_column(String(50))
+    phase: Mapped[str] = mapped_column(String(20), default="full")  # "scrape" | "extract" | "full"
     mode: Mapped[IngestionMode] = mapped_column(Enum(IngestionMode), default=IngestionMode.INCREMENTAL)
     leader_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("leaders.id"))
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending/running/done/failed
