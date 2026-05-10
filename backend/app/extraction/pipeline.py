@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal
 from app.extraction.embed_client import find_nearest_duplicate, get_embedding
+from app.extraction.normalize import normalize_numbers
 from app.extraction.extractor import detect_contradictions, extract_promises
 from app.extraction.flagging import run_flagging_pipeline
 from app.extraction.scrapers.news import fetch_news_articles
@@ -402,7 +403,7 @@ def _get_new_promise_ids(db: Session, leader_id: int, since: datetime) -> list[i
 
 def _attach_embedding_and_check_dup(db: Session, promise: Promise) -> None:
     """Compute embedding for promise, store it, and set near_duplicate_of if a near-dup exists."""
-    embedding = get_embedding(promise.summary)
+    embedding = get_embedding(normalize_numbers(promise.summary))
     if not embedding:
         return
 
