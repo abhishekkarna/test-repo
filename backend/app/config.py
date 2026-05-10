@@ -19,8 +19,13 @@ class Settings(BaseSettings):
     pib_base_url: str = "https://pib.gov.in"
     news_api_key: str = ""
 
+    # Embedding (near-duplicate detection)
+    embedding_model: str = "nomic-embed-text"   # free, local via Ollama
+    embedding_similarity_threshold: float = 0.85
+    embedding_candidate_limit: int = 500        # max existing promises to compare against
+
     # Pipeline tuning
-    min_confidence_score: float = 0.6       # discard extractions below this
+    min_confidence_score: float = 0.65      # discard extractions below this
     contradiction_batch_size: int = 20      # max existing promises per contradiction LLM call
     status_check_batch_size: int = 10       # max promises per status-check LLM call
 

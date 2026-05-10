@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leader Promise Tracker</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f0f2f5;
+      --surface: #fff;
+      --header-bg: #0f172a;
+      --header-text: #e2e8f0;
+      --accent: #3b82f6;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --muted: #64748b;
+      --radius: 8px;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--header-bg);
+      color: var(--header-text);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 200;
+      box-shadow: 0 2px 12px rgba(0,0,0,.4);
+    }
+    .header-left { display: flex; align-items: center; gap: 10px; }
+    .header-left h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
+    .header-left .subtitle { font-size: .8rem; color: #94a3b8; }
+    .stats { display: flex; gap: 8px; flex-wrap: wrap; }
+    .stat {
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.12);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: .78rem;
+      white-space: nowrap;
+      color: #cbd5e1;
+    }
+    .stat strong { color: #fff; }
+
+    /* ── Filters ── */
+    .filters {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 28px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 53px;
+      z-index: 100;
+    }
+    .filter-label { font-size: .75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .filters select, .filters input[type=search] {
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: .85rem;
+      background: #f8fafc;
+      color: var(--text);
+      outline: none;
+      transition: border-color .15s;
+    }
+    .filters select:focus, .filters input[type=search]:focus { border-color: var(--accent); background: #fff; }
+    #search { width: 240px; }
+    .result-count { margin-left: auto; font-size: .82rem; color: var(--muted); white-space: nowrap; }
+
+    /* ── Table container ── */
+    .table-wrap { padding: 20px 28px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+      font-size: .875rem;
+    }
+    thead th {
+      background: #f8fafc;
+      padding: 11px 14px;
+      text-align: left;
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      border-bottom: 2px solid var(--border);
+      white-space: nowrap;
+      user-select: none;
+    }
+    thead th.sortable { cursor: pointer; }
+    thead th.sortable:hover { color: var(--accent); }
+    tbody td {
+      padding: 11px 14px;
+      border-bottom: 1px solid #f1f5f9;
+      vertical-align: top;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: #f8fafc; }
+
+    .col-leader { width: 110px; }
+    .col-promise { min-width: 260px; max-width: 380px; }
+    .col-topic   { width: 130px; }
+    .col-status  { width: 120px; }
+    .col-conf    { width: 90px; }
+    .col-date    { width: 100px; white-space: nowrap; }
+    .col-source  { width: 180px; }
+
+    .promise-summary { line-height: 1.5; }
+    .promise-note { font-size: .77rem; color: var(--muted); margin-top: 3px; line-height: 1.4; }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 12px;
+      font-size: .75rem;
+      font-weight: 600;
+      line-height: 1.6;
+      white-space: nowrap;
+    }
+    /* Status */
+    .s-pending      { background: #f1f5f9; color: #475569; }
+    .s-in_progress  { background: #dbeafe; color: #1d4ed8; }
+    .s-fulfilled    { background: #dcfce7; color: #15803d; }
+    .s-broken       { background: #fee2e2; color: #b91c1c; }
+    .s-expired      { background: #fef9c3; color: #a16207; }
+    .s-contradicted { background: #f3e8ff; color: #7c3aed; }
+    /* Topic */
+    .t-economy       { background: #dbeafe; color: #1e40af; }
+    .t-healthcare    { background: #d1fae5; color: #065f46; }
+    .t-education     { background: #fef9c3; color: #854d0e; }
+    .t-infrastructure{ background: #ffedd5; color: #c2410c; }
+    .t-agriculture   { background: #ecfdf5; color: #14532d; }
+    .t-defense       { background: #e0e7ff; color: #3730a3; }
+    .t-environment   { background: #d1fae5; color: #064e3b; }
+    .t-social_welfare{ background: #fce7f3; color: #9d174d; }
+    .t-governance    { background: #f0fdf4; color: #166534; }
+    .t-foreign_policy{ background: #e0f2fe; color: #075985; }
+    .t-other         { background: #f1f5f9; color: #64748b; }
+
+    /* Leader chip */
+    .leader-chip {
+      display: inline-block;
+      font-size: .73rem;
+      font-weight: 700;
+      color: #0f172a;
+      background: #e2e8f0;
+      padding: 3px 9px;
+      border-radius: 12px;
+      white-space: nowrap;
+      letter-spacing: .01em;
+    }
+
+    /* Confidence bar */
+    .conf-wrap { display: flex; align-items: center; gap: 6px; }
+    .conf-val  { font-size: .78rem; color: var(--muted); min-width: 28px; }
+    .conf-bar  { flex: 1; height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden; }
+    .conf-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+
+    /* Source link */
+    .src-link {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: .8rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      word-break: break-word;
+      line-height: 1.4;
+    }
+    .src-link:hover { text-decoration: underline; }
+    .src-type { font-size: .73rem; color: var(--muted); margin-top: 2px; }
+
+    /* ── Expandable contradiction rows ── */
+    tr.has-contradictions { cursor: pointer; }
+    tr.has-contradictions td:first-child {
+      border-left: 3px solid #7c3aed;
+    }
+    tr.has-contradictions:hover td { background: #faf5ff; }
+
+    .expand-hint {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: .72rem;
+      color: #7c3aed;
+      margin-top: 4px;
+      font-weight: 600;
+    }
+    .expand-hint svg { transition: transform .2s; }
+    tr.expanded .expand-hint svg { transform: rotate(90deg); }
+
+    tr.contradiction-detail td {
+      background: #faf5ff;
+      border-bottom: 1px solid #e9d5ff;
+      padding: 0;
+    }
+    .contradiction-panel {
+      padding: 14px 20px 16px 36px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .contradiction-panel h4 {
+      font-size: .75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: #7c3aed;
+      margin-bottom: 2px;
+    }
+    .c-item {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px 14px;
+      align-items: start;
+      padding: 10px 14px;
+      background: #fff;
+      border: 1px solid #e9d5ff;
+      border-radius: 6px;
+    }
+    .c-meta { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; padding-top: 1px; }
+    .sev-major    { background: #fee2e2; color: #b91c1c; }
+    .sev-moderate { background: #fef3c7; color: #92400e; }
+    .sev-minor    { background: #f1f5f9; color: #475569; }
+    .c-conf { font-size: .72rem; color: var(--muted); }
+    .c-body { display: flex; flex-direction: column; gap: 6px; }
+    .c-explanation { font-size: .84rem; line-height: 1.55; color: var(--text); }
+    .c-conflicts { font-size: .78rem; color: var(--muted); }
+    .c-conflicts strong { color: #475569; }
+
+    /* States */
+    .loading, .empty {
+      padding: 72px 28px;
+      text-align: center;
+      color: var(--muted);
+      font-size: .95rem;
+    }
+    .loading::before { content: '⏳ '; }
+    .empty::before   { content: '🔍 '; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <div>
+      <h1>Leader Promise Tracker</h1>
+      <div class="subtitle">India political promises — extracted &amp; tracked</div>
+    </div>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<div class="filters">
+  <span class="filter-label">Filter</span>
+  <select id="fl-leader"><option value="">All Leaders</option></select>
+  <select id="fl-status">
+    <option value="">All Statuses</option>
+    <option value="pending">Pending</option>
+    <option value="in_progress">In Progress</option>
+    <option value="fulfilled">Fulfilled</option>
+    <option value="broken">Broken</option>
+    <option value="expired">Expired</option>
+    <option value="contradicted">Contradicted</option>
+  </select>
+  <select id="fl-topic">
+    <option value="">All Topics</option>
+    <option value="economy">Economy</option>
+    <option value="healthcare">Healthcare</option>
+    <option value="education">Education</option>
+    <option value="infrastructure">Infrastructure</option>
+    <option value="agriculture">Agriculture</option>
+    <option value="defense">Defense</option>
+    <option value="environment">Environment</option>
+    <option value="social_welfare">Social Welfare</option>
+    <option value="governance">Governance</option>
+    <option value="foreign_policy">Foreign Policy</option>
+    <option value="other">Other</option>
+  </select>
+  <input id="search" type="search" placeholder="Search promises…">
+  <span class="result-count" id="result-count"></span>
+</div>
+
+<div class="table-wrap">
+  <p class="loading" id="loading">Loading promises…</p>
+  <p class="empty"   id="empty"   style="display:none">No promises match your filters.</p>
+  <table id="table"              style="display:none">
+    <thead>
+      <tr>
+        <th class="col-leader">Leader</th>
+        <th class="col-promise">Promise</th>
+        <th class="col-topic">Topic</th>
+        <th class="col-status">Status</th>
+        <th class="col-conf">Confidence</th>
+        <th class="col-date">Date</th>
+        <th class="col-source">Source</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script>
+  const API = location.origin;
+  let allPromises = [];
+  let leaderMap   = {};   // id → name
+  let promiseById = {};   // id → promise
+
+  /* ── Bootstrap ── */
+  async function init() {
+    const [pRes, lRes] = await Promise.all([
+      fetch(`${API}/promises/?limit=500`),
+      fetch(`${API}/leaders/?limit=100`),
+    ]);
+
+    const leaders = await lRes.json();
+    leaders.forEach(l => { leaderMap[l.id] = l.name; });
+    const sel = document.getElementById('fl-leader');
+    leaders.forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.id; o.textContent = l.name;
+      sel.appendChild(o);
+    });
+
+    allPromises = await pRes.json();
+    document.getElementById('loading').style.display = 'none';
+    renderStats();
+    render();
+  }
+
+  /* ── Stats bar ── */
+  function renderStats() {
+    const by = {};
+    allPromises.forEach(p => { by[p.status] = (by[p.status] || 0) + 1; });
+    const parts = [
+      `<span class="stat">Total <strong>${allPromises.length}</strong></span>`,
+      by.fulfilled    ? `<span class="stat">✅ Fulfilled <strong>${by.fulfilled}</strong></span>` : '',
+      by.broken       ? `<span class="stat">❌ Broken <strong>${by.broken}</strong></span>` : '',
+      by.pending      ? `<span class="stat">⏳ Pending <strong>${by.pending}</strong></span>` : '',
+      by.in_progress  ? `<span class="stat">🔄 In Progress <strong>${by.in_progress}</strong></span>` : '',
+      by.contradicted ? `<span class="stat">⚡ Contradicted <strong>${by.contradicted}</strong></span>` : '',
+      by.expired      ? `<span class="stat">⌛ Expired <strong>${by.expired}</strong></span>` : '',
+    ];
+    document.getElementById('stats').innerHTML = parts.join('');
+  }
+
+  /* ── Render table ── */
+  function render() {
+    const filterLeader = document.getElementById('fl-leader').value;
+    const filterStatus = document.getElementById('fl-status').value;
+    const filterTopic  = document.getElementById('fl-topic').value;
+    const q = document.getElementById('search').value.trim().toLowerCase();
+
+    const rows = allPromises.filter(p => {
+      if (filterLeader && String(p.leader_id) !== filterLeader) return false;
+      if (filterStatus && p.status !== filterStatus) return false;
+      if (filterTopic  && p.topic  !== filterTopic)  return false;
+      if (q) {
+        const hay = [p.summary, p.text, p.source_title, leaderMap[p.leader_id]]
+          .filter(Boolean).join(' ').toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    document.getElementById('result-count').textContent =
+      `${rows.length} promise${rows.length !== 1 ? 's' : ''}`;
+
+    const table = document.getElementById('table');
+    const empty = document.getElementById('empty');
+
+    if (rows.length === 0) {
+      table.style.display = 'none';
+      empty.style.display = 'block';
+      return;
+    }
+    table.style.display = 'table';
+    empty.style.display = 'none';
+
+    document.getElementById('tbody').innerHTML = rows.map(row).join('');
+    // Build a fast lookup for the rendered rows
+    promiseById = {};
+    allPromises.forEach(p => { promiseById[p.id] = p; });
+  }
+
+  /* ── Row builder ── */
+  function row(p) {
+    const leader   = esc(leaderMap[p.leader_id] || `Leader ${p.leader_id}`);
+    const summary  = esc(p.summary || p.text || '—');
+    const note     = p.extraction_notes
+      ? `<div class="promise-note">${esc(p.extraction_notes.slice(0, 100))}${p.extraction_notes.length > 100 ? '…' : ''}</div>`
+      : '';
+    const topic    = p.topic || 'other';
+    const status   = p.status || 'pending';
+    const topicLbl = topic.replace(/_/g, ' ');
+    const statLbl  = status.replace(/_/g, ' ');
+    const conf     = p.confidence_score != null ? Math.round(p.confidence_score * 100) : null;
+    const confCell = conf !== null
+      ? `<div class="conf-wrap">
+           <span class="conf-val">${conf}%</span>
+           <div class="conf-bar"><div class="conf-fill" style="width:${conf}%"></div></div>
+         </div>`
+      : '<span style="color:#94a3b8">—</span>';
+    const date     = fmtDate(p.promised_at);
+    const srcTitle = esc(p.source_title || friendlySourceType(p.source_type));
+    const srcType  = esc(friendlySourceType(p.source_type));
+    const srcCell  = p.source_url
+      ? `<a class="src-link" href="${esc(p.source_url)}" target="_blank" rel="noopener noreferrer">
+           ${srcTitle}${externalIcon()}
+         </a>
+         <div class="src-type">${srcType}</div>`
+      : `<span class="src-type">${srcType || '—'}</span>`;
+
+    const hasContradictions = p.contradictions && p.contradictions.length > 0;
+    const n = hasContradictions ? p.contradictions.length : 0;
+    const expandHint = hasContradictions
+      ? `<div class="expand-hint">
+           <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor">
+             <path d="M2 1l4 3-4 3V1z"/>
+           </svg>
+           ${n} contradiction${n > 1 ? 's' : ''} — click to expand
+         </div>`
+      : '';
+
+    const trClass = hasContradictions ? 'has-contradictions' : '';
+    const trData  = hasContradictions ? `data-pid="${p.id}"` : '';
+
+    return `<tr class="${trClass}" ${trData}>
+      <td><span class="leader-chip">${leader}</span></td>
+      <td class="col-promise"><div class="promise-summary">${summary}</div>${note}</td>
+      <td><span class="badge t-${topic}">${topicLbl}</span></td>
+      <td>
+        <span class="badge s-${status}">${statLbl}</span>
+        ${expandHint}
+      </td>
+      <td>${confCell}</td>
+      <td>${date}</td>
+      <td>${srcCell}</td>
+    </tr>`;
+  }
+
+  /* ── Contradiction detail panel ── */
+  function contradictionDetailRow(p) {
+    const items = p.contradictions.map(c => {
+      const sevClass = `sev-${c.severity || 'minor'}`;
+      const sevLabel = (c.severity || 'minor');
+      const confPct  = c.confidence_score != null ? Math.round(c.confidence_score * 100) + '%' : '—';
+      // Find the other promise in the pair
+      const otherId  = c.original_promise_id === p.id
+        ? c.contradicting_promise_id
+        : c.original_promise_id;
+      const other    = promiseById[otherId];
+      const otherSummary = other
+        ? `<div class="c-conflicts">Conflicts with: <strong>${esc(other.summary || '').slice(0, 120)}</strong></div>`
+        : '';
+      return `<div class="c-item">
+        <div class="c-meta">
+          <span class="badge ${sevClass}">${sevLabel}</span>
+          <span class="c-conf">conf. ${confPct}</span>
+        </div>
+        <div class="c-body">
+          <div class="c-explanation">${esc(c.explanation || '—')}</div>
+          ${otherSummary}
+        </div>
+      </div>`;
+    }).join('');
+
+    return `<tr class="contradiction-detail">
+      <td colspan="7">
+        <div class="contradiction-panel">
+          <h4>⚡ Why this promise is contradicted</h4>
+          ${items}
+        </div>
+      </td>
+    </tr>`;
+  }
+
+  /* ── Helpers ── */
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function fmtDate(s) {
+    if (!s) return '<span style="color:#94a3b8">—</span>';
+    try {
+      return new Date(s).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' });
+    } catch {
+      return String(s).slice(0, 10);
+    }
+  }
+
+  function friendlySourceType(t) {
+    return {
+      news_article:  'News',
+      lok_sabha:     'Lok Sabha',
+      rajya_sabha:   'Rajya Sabha',
+      press_release: 'Press Release',
+      social_media:  'Social Media',
+      speech:        'Speech',
+      manifesto:     'Manifesto',
+    }[t] || (t || '');
+  }
+
+  function externalIcon() {
+    return `<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" style="flex-shrink:0;margin-left:2px">
+              <path d="M5 3H3a1 1 0 00-1 1v5a1 1 0 001 1h5a1 1 0 001-1V7"/>
+              <path d="M8 1h3v3M11 1L6 6"/>
+            </svg>`;
+  }
+
+  /* ── Wire up filters ── */
+  ['fl-leader', 'fl-status', 'fl-topic'].forEach(id =>
+    document.getElementById(id).addEventListener('change', render)
+  );
+  document.getElementById('search').addEventListener('input', render);
+
+  /* ── Expand / collapse contradiction rows ── */
+  document.getElementById('tbody').addEventListener('click', e => {
+    // Ignore clicks on links inside the row
+    if (e.target.closest('a')) return;
+
+    const tr = e.target.closest('tr.has-contradictions');
+    if (!tr) return;
+
+    const pid = Number(tr.dataset.pid);
+    const p   = promiseById[pid];
+    if (!p) return;
+
+    const existing = tr.nextElementSibling;
+    if (existing && existing.classList.contains('contradiction-detail')) {
+      existing.remove();
+      tr.classList.remove('expanded');
+    } else {
+      tr.insertAdjacentHTML('afterend', contradictionDetailRow(p));
+      tr.classList.add('expanded');
+    }
+  });
+
+  init().catch(err => {
+    document.getElementById('loading').textContent = 'Failed to load data: ' + err.message;
+  });
+</script>
+</body>
+</html>

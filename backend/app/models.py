@@ -57,6 +57,21 @@ class IngestionMode(str, enum.Enum):
     INCREMENTAL = "incremental"  # daily scan, only since last_ingested_at
 
 
+class FlagType(str, enum.Enum):
+    BROKEN_PROMISE = "broken_promise"
+    CONTRADICTION = "contradiction"
+    DEADLINE_OVERDUE = "deadline_overdue"
+    NEAR_DUPLICATE_LINKED = "near_duplicate_linked"
+    UNFULFILLED_HIGH_CONFIDENCE = "unfulfilled_high_confidence"
+
+
+class FlagSeverity(str, enum.Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
 class Leader(Base):
     __tablename__ = "leaders"
 
@@ -110,8 +125,9 @@ class Promise(Base):
     confidence_score: Mapped[float | None] = mapped_column(Float)
     extraction_notes: Mapped[str | None] = mapped_column(Text)
     raw_context: Mapped[str | None] = mapped_column(Text)
-    content_hash: Mapped[str | None] = mapped_column(String(64))     # SHA-256 of summary for promise dedup
-    near_duplicate_of: Mapped[int | None] = mapped_column(Integer, ForeignKey("promises.id"))  # future embedding dedup
+    content_hash: Mapped[str | None] = mapped_column(String(64))     # SHA-256 of summary for exact dedup
+    near_duplicate_of: Mapped[int | None] = mapped_column(Integer, ForeignKey("promises.id"))  # set when embedding similarity >= threshold
+    embedding: Mapped[list | None] = mapped_column(JSON)             # all-MiniLM-L6-v2 vector (384-dim)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -119,6 +135,7 @@ class Promise(Base):
 
     leader: Mapped["Leader"] = relationship("Leader", back_populates="promises")
     status_updates: Mapped[list["PromiseStatusUpdate"]] = relationship("PromiseStatusUpdate", back_populates="promise")
+    flags: Mapped[list["Flag"]] = relationship("Flag", back_populates="promise", cascade="all, delete-orphan")
     contradictions_as_original: Mapped[list["Contradiction"]] = relationship(
         "Contradiction", foreign_keys="Contradiction.original_promise_id", back_populates="original_promise"
     )
@@ -163,6 +180,36 @@ class Contradiction(Base):
     contradicting_promise: Mapped["Promise"] = relationship(
         "Promise", foreign_keys=[contradicting_promise_id], back_populates="contradictions_as_new"
     )
+
+
+class Flag(Base):
+    """Actionable alert raised automatically or manually for a promise."""
+
+    __tablename__ = "flags"
+    __table_args__ = (
+        Index("ix_flags_leader", "leader_id"),
+        Index("ix_flags_type_severity", "flag_type", "severity"),
+        Index("ix_flags_reviewed", "reviewed"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    promise_id: Mapped[int] = mapped_column(Integer, ForeignKey("promises.id"), nullable=False)
+    leader_id: Mapped[int] = mapped_column(Integer, ForeignKey("leaders.id"), nullable=False)
+
+    flag_type: Mapped[FlagType] = mapped_column(Enum(FlagType), nullable=False)
+    severity: Mapped[FlagSeverity] = mapped_column(Enum(FlagSeverity), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # optional link to a second promise (for contradiction / near-dup flags)
+    related_promise_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("promises.id"))
+
+    auto_flagged: Mapped[bool] = mapped_column(Boolean, default=True)
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    promise: Mapped["Promise"] = relationship("Promise", foreign_keys=[promise_id], back_populates="flags")
 
 
 class ScrapedArticle(Base):

@@ -12,6 +12,7 @@ router = APIRouter(prefix="/promises", tags=["promises"])
 
 @router.get("/", response_model=list[PromiseOut])
 def list_promises(
+    leader_id: int | None = None,
     status: str | None = None,
     topic: str | None = None,
     verified: bool | None = None,
@@ -24,6 +25,8 @@ def list_promises(
         selectinload(Promise.contradictions_as_original),
         selectinload(Promise.contradictions_as_new),
     )
+    if leader_id is not None:
+        q = q.filter(Promise.leader_id == leader_id)
     if status:
         q = q.filter(Promise.status == status)
     if topic:

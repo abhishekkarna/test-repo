@@ -10,46 +10,65 @@ from app.extraction.llm_client import llm
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a political analyst specializing in tracking politician promises and commitments.
-Your task is to extract specific, concrete promises from political text.
+SYSTEM_PROMPT = """You are a fact-checker building a public accountability database of politician promises.
+Your job is to extract only SPECIFIC, TRACKABLE promises — statements where a neutral observer
+could later determine with confidence whether the promise was kept or broken.
 
-A "promise" is:
-- A specific commitment to DO something or DELIVER something
-- Made by a named political leader
-- Verifiable (can be checked if fulfilled or not)
+A promise QUALIFIES only if it has at least one concrete anchor:
+  • A specific number or amount  ("₹10,000 crore", "2 crore homes", "50% increase")
+  • A named scheme, bill, or program  ("PM Kisan", "Ayushman Bharat", "CAA implementation")
+  • A concrete action with an observable outcome  ("inaugurate X", "pass Y bill", "build Z highway")
+  • A specific deadline or timeframe  ("by 2025", "within 100 days", "before the next budget")
+  • A named, specific beneficiary group  ("farmers in Vidarbha", "MSMEs under ₹5 crore turnover")
 
-NOT a promise:
-- Vague aspirational statements ("we will work hard")
-- General policy positions without commitment
-- Past achievements being described
-- Criticisms of opponents
+REJECT anything that:
+  • Is vague or aspirational  ("improve governance", "bring development", "fight corruption")
+  • Cannot be verified true/false  ("work for the people", "ensure prosperity")
+  • Is a general policy stance, not a commitment  ("we believe in federalism")
+  • Describes past achievements  ("we have already built 10 lakh homes")
+  • Is a criticism of opponents  ("they failed to deliver X")
+  • Is a conditional wish with no commitment  ("if elected, we hope to...")
 
-Be conservative — only extract statements that are clearly promises, not opinions or goals."""
+Confidence scoring guide:
+  0.9–1.0  Explicit first-person commitment with number + deadline  ("I will build 5 AIIMS by 2026")
+  0.7–0.9  Clear commitment with either a number OR a deadline, not both
+  0.5–0.7  Commitment with a named scheme but no specific number or deadline
+  below 0.5  Too vague — do NOT include these, return nothing instead
+
+Be strict. Five high-quality promises are better than twenty mediocre ones."""
 
 
-EXTRACT_PROMPT_TEMPLATE = """Analyze the following text from {source_type} and extract any promises made by {leader_name}.
+EXTRACT_PROMPT_TEMPLATE = """Extract trackable promises made by {leader_name} from the text below.
+
+Source type: {source_type}
+Source: {source_title}
+Date: {source_date}
 
 Text:
 ---
 {text}
 ---
 
-Source: {source_title}
-Date: {source_date}
+Rules:
+- Only extract promises BY {leader_name}, not promises made by others or about others
+- Each promise must have at least one concrete anchor (number, named scheme, specific deadline, or named beneficiary)
+- Reject vague statements like "improve governance", "ensure development", "fight corruption"
+- Reject past achievements — only forward-looking commitments count
+- If the same promise appears multiple times in the text, extract it once
 
-Return a JSON array of promises. Each promise object must have:
+Return a JSON array. Each object must have:
 {{
-  "text": "exact quote or close paraphrase of the promise",
-  "summary": "one sentence summary (max 100 chars)",
+  "text": "verbatim quote or minimal paraphrase preserving all specifics",
+  "summary": "one sentence, max 120 chars, must include the key specific detail (number/scheme/deadline)",
   "topic": one of ["economy", "healthcare", "education", "infrastructure", "agriculture", "defense", "environment", "social_welfare", "governance", "foreign_policy", "other"],
-  "promised_at": "ISO date string or null",
-  "deadline": "ISO date string if a timeframe is mentioned, else null",
-  "confidence_score": float between 0 and 1,
-  "extraction_notes": "brief explanation of why this qualifies as a promise"
+  "promised_at": "YYYY-MM-DD or null",
+  "deadline": "YYYY-MM-DD if a deadline is mentioned, else null",
+  "confidence_score": float 0.5–1.0 (see scoring guide — do not include below 0.5),
+  "extraction_notes": "one line: which anchor makes this trackable (e.g. 'specific amount + deadline')"
 }}
 
-If no promises are found, return an empty array [].
-Return ONLY valid JSON, no other text."""
+If no qualifying promises are found, return [].
+Return ONLY valid JSON, no explanation."""
 
 
 CONTRADICTION_PROMPT_TEMPLATE = """You are checking if a new political promise contradicts any existing promises by the same leader.

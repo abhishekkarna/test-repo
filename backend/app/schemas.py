@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, HttpUrl
 
-from app.models import PromiseStatus, PromiseTopic, SourceType
+from app.models import FlagSeverity, FlagType, PromiseStatus, PromiseTopic, SourceType
 
 
 # ── Leader ────────────────────────────────────────────────────────────────────
@@ -101,9 +101,11 @@ class PromiseOut(PromiseBase):
 
 class IngestRequest(BaseModel):
     leader_id: int
-    source_type: str  # "news" | "lok_sabha" | "rajya_sabha"
-    query: str | None = None    # optional search term override
+    source_type: str  # "news" | "lok_sabha" | "rajya_sabha" | "pib" | "sansad" | "all"
+    query: str | None = None
     max_articles: int = 20
+    since_date: datetime | None = None   # lower bound for article date
+    until_date: datetime | None = None   # upper bound for article date
 
 
 class IngestResponse(BaseModel):
@@ -112,3 +114,26 @@ class IngestResponse(BaseModel):
     promises_extracted: int
     contradictions_found: int
     message: str
+
+
+# ── Flags ─────────────────────────────────────────────────────────────────────
+
+class FlagOut(BaseModel):
+    id: int
+    promise_id: int
+    leader_id: int
+    flag_type: FlagType
+    severity: FlagSeverity
+    message: str
+    related_promise_id: int | None = None
+    auto_flagged: bool
+    reviewed: bool
+    reviewed_at: datetime | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class FlagReviewRequest(BaseModel):
+    reviewed: bool

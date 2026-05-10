@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
+from app.extraction.embed_client import find_nearest_duplicate, get_embedding
 from app.extraction.extractor import detect_contradictions, extract_promises
+from app.extraction.flagging import run_flagging_pipeline
 from app.extraction.scrapers.news import fetch_news_articles
 from app.extraction.scrapers.parliament import PIBScraper, PRSIndiaScraper, SansadScraper
 from app.extraction.scrapers.utils import chunk_text
@@ -103,15 +105,16 @@ def _run_scrape(db: Session, job_id: int, payload: IngestRequest) -> None:
     db.commit()
 
     is_backfill = job.mode == IngestionMode.BACKFILL
-    since_date = None if is_backfill else leader.last_ingested_at
+    since_date = payload.since_date or (None if is_backfill else leader.last_ingested_at)
+    until_date = payload.until_date
     max_items = payload.max_articles
 
     logger.info(
-        "[job=%d phase=scrape] leader=%s source=%s since=%s max=%d",
-        job_id, leader.name, payload.source_type, since_date, max_items,
+        "[job=%d phase=scrape] leader=%s source=%s since=%s until=%s max=%d",
+        job_id, leader.name, payload.source_type, since_date, until_date, max_items,
     )
 
-    raw_articles = _fetch(payload.source_type, leader.name, since_date, max_items)
+    raw_articles = _fetch(payload.source_type, leader.name, since_date, max_items, until_date)
     fresh = _store_articles(raw_articles, leader.id, db)
 
     job.articles_scraped = len(raw_articles)
@@ -189,6 +192,10 @@ def _run_extract(db: Session, job_id: int, leader_id: int) -> None:
     if fresh_article_dicts:
         run_status_update_pipeline(leader_id, fresh_article_dicts, db)
 
+    # Flagging pass — runs last so it sees final statuses from status-update pipeline
+    if new_promise_ids:
+        run_flagging_pipeline(new_promise_ids, db)
+
     job.status = "done"
     job.promises_extracted = (job.promises_extracted or 0) + total_promises
     job.contradictions_found = (job.contradictions_found or 0) + total_contradictions
@@ -207,28 +214,59 @@ def _run_extract(db: Session, job_id: int, leader_id: int) -> None:
 
 # ── Fetching ──────────────────────────────────────────────────────────────────
 
-def _fetch(source_type: str, leader_name: str, since_date: datetime | None, max_items: int) -> list[dict]:
+def _fetch(
+    source_type: str,
+    leader_name: str,
+    since_date: datetime | None,
+    max_items: int,
+    until_date: datetime | None = None,
+) -> list[dict]:
     try:
         if source_type == "news":
-            return fetch_news_articles(leader_name, max_items)
-        if source_type in ("lok_sabha", "rajya_sabha"):
+            articles = fetch_news_articles(leader_name, max_items, since_date, until_date)
+        elif source_type in ("lok_sabha", "rajya_sabha"):
             house = "loksabha" if source_type == "lok_sabha" else "rajyasabha"
-            return PRSIndiaScraper().fetch(leader_name, since_date, max_items, house=house)
-        if source_type == "sansad":
-            return SansadScraper().fetch(leader_name, since_date, max_items)
-        if source_type == "pib":
-            return PIBScraper().fetch(leader_name, since_date, max_items)
-        if source_type == "all":
+            articles = PRSIndiaScraper().fetch(leader_name, since_date, max_items, house=house)
+        elif source_type == "sansad":
+            articles = SansadScraper().fetch(leader_name, since_date, max_items)
+        elif source_type == "pib":
+            articles = PIBScraper().fetch(leader_name, since_date, max_items)
+        elif source_type == "all":
             per = max(1, max_items // 4)
             articles = []
-            articles += fetch_news_articles(leader_name, per)
+            articles += fetch_news_articles(leader_name, per, since_date, until_date)
             articles += PRSIndiaScraper().fetch(leader_name, since_date, per)
             articles += SansadScraper().fetch(leader_name, since_date, per)
             articles += PIBScraper().fetch(leader_name, since_date, per)
-            return articles
+        else:
+            articles = []
+
+        if until_date:
+            articles = [a for a in articles if _is_on_or_before(a.get("published_at"), until_date)]
+        return articles
     except Exception as e:
         logger.error("Scraping failed source=%s leader=%s: %s", source_type, leader_name, e)
     return []
+
+
+def _is_on_or_before(date_str: str | None, cutoff: datetime) -> bool:
+    """Return True if date_str is unparseable (keep article) or on/before cutoff."""
+    if not date_str:
+        return True
+    # RFC 2822 (RSS pubDate): "Thu, 30 Apr 2026 10:50:00 GMT"
+    try:
+        from email.utils import parsedate
+        t = parsedate(date_str)
+        if t:
+            return datetime(*t[:6]) <= cutoff
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d %b %Y", "%d/%m/%Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(date_str[:19], fmt) <= cutoff
+        except ValueError:
+            continue
+    return True
 
 
 # ── Storage (Phase 1 write) ───────────────────────────────────────────────────
@@ -344,6 +382,7 @@ def _process_article(db: Session, article: dict, leader: Leader, job_id: int) ->
         )
         db.add(promise)
         db.flush()
+        _attach_embedding_and_check_dup(db, promise)
         saved.append(promise)
 
     db.commit()
@@ -357,6 +396,40 @@ def _get_new_promise_ids(db: Session, leader_id: int, since: datetime) -> list[i
         .all()
     )
     return [r[0] for r in rows]
+
+
+# ── Embedding near-duplicate detection ───────────────────────────────────────
+
+def _attach_embedding_and_check_dup(db: Session, promise: Promise) -> None:
+    """Compute embedding for promise, store it, and set near_duplicate_of if a near-dup exists."""
+    embedding = get_embedding(promise.summary)
+    if not embedding:
+        return
+
+    promise.embedding = embedding
+
+    candidates_q = (
+        db.query(Promise.id, Promise.embedding)
+        .filter(
+            Promise.leader_id == promise.leader_id,
+            Promise.id != promise.id,
+            Promise.embedding.isnot(None),
+        )
+        .order_by(Promise.created_at.desc())
+        .limit(settings.embedding_candidate_limit)
+        .all()
+    )
+    candidates = [(row[0], row[1]) for row in candidates_q if row[1]]
+
+    dup_id = find_nearest_duplicate(
+        embedding,
+        candidates,
+        settings.embedding_similarity_threshold,
+    )
+    if dup_id is not None:
+        promise.near_duplicate_of = dup_id
+
+    db.flush()
 
 
 # ── Contradiction detection ───────────────────────────────────────────────────
