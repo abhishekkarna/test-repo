@@ -7,6 +7,8 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
+import time
+
 import httpx
 
 from app.config import settings
@@ -97,11 +99,15 @@ def fetch_gdelt_articles(
     start = (since_date or (now - timedelta(days=30))).strftime("%Y%m%d%H%M%S")
     end = (until_date or now).strftime("%Y%m%d%H%M%S")
 
-    query = f'"{leader_name}" (promise OR pledges OR announces OR commits OR guarantee)'
+    query = (
+        f'"{leader_name}" '
+        f'(promise OR pledges OR announces OR commits OR guarantee '
+        f'OR committed OR aims OR target OR intend)'
+    )
     params = {
         "query": query,
         "mode": "artlist",
-        "maxrecords": min(max_articles * 3, 75),  # fetch extra since we filter later
+        "maxrecords": min(max_articles * 2, 250),
         "startdatetime": start,
         "enddatetime": end,
         "sourcelang": "english",
@@ -109,12 +115,23 @@ def fetch_gdelt_articles(
         "format": "json",
     }
 
-    try:
-        r = httpx.get(GDELT_API, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logger.error("GDELT API error: %s", e)
+    data = None
+    for attempt in range(3):
+        try:
+            r = httpx.get(GDELT_API, params=params, timeout=20)
+            if r.status_code == 429:
+                wait = 15 * (attempt + 1)
+                logger.warning("GDELT rate limited (429), retrying in %ds (attempt %d/3)", wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            break
+        except httpx.HTTPError as e:
+            logger.error("GDELT API error (attempt %d/3): %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(10)
+    if data is None:
         return []
 
     raw_articles = data.get("articles") or []

@@ -4,9 +4,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.extraction.pipeline import run_extract_pipeline, run_ingestion_pipeline, run_scrape_pipeline
+from app.extraction.pipeline import run_extract_pipeline, run_ingestion_pipeline, run_scrape_pipeline, run_windowed_backfill_pipeline
 from app.models import IngestionJob, IngestionMode, Leader, ScrapedArticle
-from app.schemas import IngestRequest, IngestResponse
+from app.schemas import IngestRequest, IngestResponse, WindowedBackfillRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
@@ -119,6 +119,62 @@ def trigger_ingestion(
         promises_extracted=0,
         contradictions_found=0,
         message=f"Full pipeline job {job.id} queued for {leader.name} ({payload.source_type})",
+    )
+
+
+@router.post("/backfill/windowed", response_model=IngestResponse)
+def trigger_windowed_backfill(
+    payload: WindowedBackfillRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Year-windowed historical backfill. Scrapes one year at a time from start_year
+    to end_year, then runs LLM extraction once on all stored articles.
+    Poll GET /ingest/jobs/{job_id} to see per-year progress in job.metadata.
+    """
+    leader = db.query(Leader).filter(Leader.id == payload.leader_id).first()
+    if not leader:
+        raise HTTPException(status_code=404, detail="Leader not found")
+
+    n_years = payload.end_year - payload.start_year + 1
+    job = IngestionJob(
+        source_type=payload.source_type,
+        phase="full",
+        mode=IngestionMode.BACKFILL,
+        leader_id=payload.leader_id,
+        status="pending",
+        job_metadata={
+            "start_year": payload.start_year,
+            "end_year": payload.end_year,
+            "articles_per_window": payload.articles_per_window,
+            "total_years": n_years,
+        },
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(
+        run_windowed_backfill_pipeline,
+        job.id,
+        payload.leader_id,
+        payload.start_year,
+        payload.end_year,
+        payload.source_type,
+        payload.articles_per_window,
+    )
+
+    return IngestResponse(
+        job_id=job.id,
+        status="pending",
+        promises_extracted=0,
+        contradictions_found=0,
+        message=(
+            f"Windowed backfill queued for {leader.name} "
+            f"({payload.start_year}–{payload.end_year}, {n_years} year-windows, "
+            f"{payload.articles_per_window} articles/window)"
+        ),
     )
 
 

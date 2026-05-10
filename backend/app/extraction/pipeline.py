@@ -13,6 +13,7 @@ This separation means:
 
 import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -55,6 +56,84 @@ _TOPIC_MAP = {t.value: t for t in PromiseTopic}
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
+
+def run_windowed_backfill_pipeline(
+    job_id: int,
+    leader_id: int,
+    start_year: int,
+    end_year: int,
+    source_type: str = "all",
+    articles_per_window: int = 50,
+) -> None:
+    """
+    Scrapes one year-window at a time (start_year → end_year), sleeping between
+    windows to respect GDELT rate limits, then runs LLM extraction once at the end.
+    Progress is written to job.job_metadata so the caller can poll it.
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(IngestionJob, job_id)
+        leader = db.get(Leader, leader_id)
+        if not job or not leader:
+            return
+
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        db.commit()
+
+        years = list(range(start_year, end_year + 1))
+        total_raw = 0
+        total_new = 0
+
+        for i, year in enumerate(years):
+            since = datetime(year, 1, 1)
+            until = datetime(year, 12, 31, 23, 59, 59)
+
+            logger.info(
+                "[job=%d windowed] year=%d (%d/%d) source=%s",
+                job_id, year, i + 1, len(years), source_type,
+            )
+
+            raw = _fetch(source_type, leader.name, since, articles_per_window, until)
+            fresh = _store_articles(raw, leader_id, db)
+            total_raw += len(raw)
+            total_new += len(fresh)
+
+            job.articles_scraped = total_raw
+            job.articles_deduped = total_raw - total_new
+            job.job_metadata = {
+                **(job.job_metadata or {}),
+                "current_year": year,
+                "years_done": i + 1,
+                "total_years": len(years),
+                "new_articles_stored": total_new,
+            }
+            db.commit()
+
+            logger.info(
+                "[job=%d windowed] year=%d raw=%d new=%d cumulative_new=%d",
+                job_id, year, len(raw), len(fresh), total_new,
+            )
+
+            if year < end_year:
+                time.sleep(10)  # avoid GDELT 429 between year windows
+
+        logger.info(
+            "[job=%d windowed] scrape done. total_raw=%d total_new=%d. starting extraction.",
+            job_id, total_raw, total_new,
+        )
+
+        _run_extract(db, job_id, leader_id)
+
+        leader.backfill_completed = True
+        db.commit()
+
+    except Exception as e:
+        logger.exception("Windowed backfill crashed for job %d", job_id)
+        _fail_job(db, job_id, str(e))
+    finally:
+        db.close()
+
 
 def run_scrape_pipeline(job_id: int, payload: IngestRequest) -> None:
     """Phase 1: fetch articles and store raw text. No LLM calls."""

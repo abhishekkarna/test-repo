@@ -116,6 +116,14 @@ class IngestResponse(BaseModel):
     message: str
 
 
+class WindowedBackfillRequest(BaseModel):
+    leader_id: int
+    start_year: int = 2011
+    end_year: int = 2026
+    source_type: str = "all"   # "news" | "pib" | "lok_sabha" | "all"
+    articles_per_window: int = 50  # per year-window, per source
+
+
 # ── Flags ─────────────────────────────────────────────────────────────────────
 
 class FlagOut(BaseModel):
